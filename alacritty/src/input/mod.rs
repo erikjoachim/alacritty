@@ -91,6 +91,13 @@ pub trait ActionContext<T: EventListener> {
     fn selection_is_empty(&self) -> bool;
     fn mouse_mut(&mut self) -> &mut Mouse;
     fn mouse(&self) -> &Mouse;
+    fn mouse_point(&self) -> Point {
+        let display_offset = self.terminal().grid().display_offset();
+        let mut point = self.mouse().point(&self.size_info(), display_offset);
+        point.column = min(point.column, self.terminal().last_column());
+        point.line = min(point.line, self.terminal().bottommost_line());
+        point
+    }
     fn touch_purpose(&mut self) -> &mut TouchPurpose;
     fn modifiers(&mut self) -> &mut Modifiers;
     fn scroll(&mut self, _scroll: Scroll) {}
@@ -99,6 +106,30 @@ pub trait ActionContext<T: EventListener> {
     fn terminal(&self) -> &Term<T>;
     fn terminal_mut(&mut self) -> &mut Term<T>;
     fn spawn_new_instance(&mut self) {}
+    fn create_new_tab(&mut self) {}
+    fn close_tab(&mut self) {}
+    fn select_next_tab(&mut self) {}
+    fn select_previous_tab(&mut self) {}
+    fn select_tab_at_index(&mut self, _index: usize) {}
+    fn select_last_tab(&mut self) {}
+    fn move_tab_forward(&mut self) {}
+    fn move_tab_backward(&mut self) {}
+    fn set_tab_title(&mut self) {}
+    fn window_close_confirmation_active(&self) -> bool {
+        false
+    }
+    fn confirm_window_close(&mut self) {}
+    fn cancel_window_close(&mut self) {}
+    fn tab_at_mouse(&mut self) -> Option<usize> {
+        None
+    }
+    fn tab_title_editor_active(&self) -> bool {
+        false
+    }
+    fn confirm_tab_title(&mut self) {}
+    fn cancel_tab_title(&mut self) {}
+    fn tab_title_input(&mut self, _c: char) {}
+    fn tab_title_pop_word(&mut self) {}
     #[cfg(target_os = "macos")]
     fn create_new_window(&mut self, _tabbing_id: Option<String>) {}
     #[cfg(not(target_os = "macos"))]
@@ -405,6 +436,10 @@ impl<T: EventListener> Execute<T> for Action {
             Action::ClearLogNotice => ctx.pop_message(),
             #[cfg(not(target_os = "macos"))]
             Action::CreateNewWindow => ctx.create_new_window(),
+            #[cfg(not(target_os = "macos"))]
+            Action::CreateNewTab => ctx.create_new_tab(),
+            #[cfg(not(target_os = "macos"))]
+            Action::CloseTab => ctx.close_tab(),
             Action::SpawnNewInstance => ctx.spawn_new_instance(),
             #[cfg(target_os = "macos")]
             Action::CreateNewWindow => ctx.create_new_window(None),
@@ -440,6 +475,36 @@ impl<T: EventListener> Execute<T> for Action {
             Action::SelectTab9 => ctx.window().select_tab_at_index(8),
             #[cfg(target_os = "macos")]
             Action::SelectLastTab => ctx.window().select_last_tab(),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectNextTab => ctx.select_next_tab(),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectPreviousTab => ctx.select_previous_tab(),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectTab1 => ctx.select_tab_at_index(0),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectTab2 => ctx.select_tab_at_index(1),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectTab3 => ctx.select_tab_at_index(2),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectTab4 => ctx.select_tab_at_index(3),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectTab5 => ctx.select_tab_at_index(4),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectTab6 => ctx.select_tab_at_index(5),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectTab7 => ctx.select_tab_at_index(6),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectTab8 => ctx.select_tab_at_index(7),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectTab9 => ctx.select_tab_at_index(8),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectLastTab => ctx.select_last_tab(),
+            #[cfg(not(target_os = "macos"))]
+            Action::MoveTabForward => ctx.move_tab_forward(),
+            #[cfg(not(target_os = "macos"))]
+            Action::MoveTabBackward => ctx.move_tab_backward(),
+            #[cfg(not(target_os = "macos"))]
+            Action::SetTabTitle => ctx.set_tab_title(),
             _ => (),
         }
     }
@@ -462,8 +527,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             self.update_selection_scrolling(y);
         }
 
-        let display_offset = self.ctx.terminal().grid().display_offset();
-        let old_point = self.ctx.mouse().point(&size_info, display_offset);
+        let old_point = self.ctx.mouse_point();
 
         let x = x.clamp(0, size_info.width() as i32 - 1) as usize;
         let y = y.clamp(0, size_info.height() as i32 - 1) as usize;
@@ -473,7 +537,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         let inside_text_area = size_info.contains_point(x, y);
         let cell_side = self.cell_side(x);
 
-        let point = self.ctx.mouse().point(&size_info, display_offset);
+        let point = self.ctx.mouse_point();
         let cell_changed = old_point != point;
 
         // If the mouse hasn't changed cells, do nothing.
@@ -539,8 +603,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     fn mouse_report(&mut self, button: u8, state: ElementState) {
-        let display_offset = self.ctx.terminal().grid().display_offset();
-        let point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
+        let point = self.ctx.mouse_point();
 
         // Assure the mouse point is not in the scrollback.
         if point.line < 0 {
@@ -647,8 +710,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             };
 
             // Load mouse point, treating message bar and padding as the closest cell.
-            let display_offset = self.ctx.terminal().grid().display_offset();
-            let point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
+            let point = self.ctx.mouse_point();
 
             if let MouseButton::Left = button {
                 self.on_left_click(point)
@@ -993,6 +1055,17 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             _ => (),
         }
 
+        if state == ElementState::Pressed
+            && button == MouseButton::Left
+            && self.ctx.config().tabs.mouse.enabled
+        {
+            if let Some(tab_index) = self.ctx.tab_at_mouse() {
+                self.ctx.select_tab_at_index(tab_index);
+                self.ctx.window().set_mouse_cursor(CursorIcon::Pointer);
+                return;
+            }
+        }
+
         // Skip normal mouse events if the message bar has been clicked.
         if self.message_bar_cursor_state() == Some(CursorIcon::Pointer)
             && state == ElementState::Pressed
@@ -1078,8 +1151,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             + size.cell_height() as usize * (size.screen_lines() + search_height);
 
         let mouse = self.ctx.mouse();
-        let display_offset = self.ctx.terminal().grid().display_offset();
-        let point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
+        let point = self.ctx.mouse_point();
 
         if self.ctx.message().is_none() || (mouse.y <= terminal_end) {
             None
@@ -1094,9 +1166,18 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
     /// Icon state of the cursor.
     fn cursor_state(&mut self) -> CursorIcon {
-        let display_offset = self.ctx.terminal().grid().display_offset();
-        let point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
+        let point = self.ctx.mouse_point();
         let hyperlink = self.ctx.terminal().grid()[point].hyperlink();
+
+        if self.ctx.config().tabs.mouse.enabled {
+            if self.ctx.tab_at_mouse().is_some() {
+                return if self.ctx.config().tabs.mouse.hover {
+                    CursorIcon::Pointer
+                } else {
+                    CursorIcon::Default
+                };
+            }
+        }
 
         // Function to check if mouse is on top of a hint.
         let hint_highlighted = |hint: &HintMatch| hint.should_highlight(point, hyperlink.as_ref());
@@ -1157,6 +1238,7 @@ mod tests {
     use winit::window::WindowId;
 
     use alacritty_terminal::event::Event as TerminalEvent;
+    use alacritty_terminal::index::Line;
 
     use crate::config::Binding;
     use crate::message_bar::MessageBuffer;
@@ -1555,5 +1637,31 @@ mod tests {
         triggers: false,
         mode: BindingMode::empty(),
         mods: ModifiersState::ALT | ModifiersState::SUPER,
+    }
+
+    #[test]
+    fn mouse_point_clamps_to_terminal_dimensions() {
+        let mut clipboard = Clipboard::new_nop();
+        let cfg = UiConfig::default();
+        let terminal_size = SizeInfo::new(20.0, 20.0, 10.0, 10.0, 0., 0., false);
+        let display_size = SizeInfo::new(30.0, 30.0, 10.0, 10.0, 0., 0., false);
+
+        let mut terminal = Term::new(cfg.term_options(), &terminal_size, MockEventProxy);
+        let mut mouse = Mouse { x: 29, y: 29, ..Mouse::default() };
+        let mut inline_search_state = InlineSearchState::default();
+        let mut message_buffer = MessageBuffer::default();
+
+        let context = ActionContext {
+            terminal: &mut terminal,
+            mouse: &mut mouse,
+            size_info: &display_size,
+            clipboard: &mut clipboard,
+            modifiers: Default::default(),
+            message_buffer: &mut message_buffer,
+            inline_search_state: &mut inline_search_state,
+            config: &cfg,
+        };
+
+        assert_eq!(super::ActionContext::mouse_point(&context), Point::new(Line(1), Column(1)));
     }
 }
