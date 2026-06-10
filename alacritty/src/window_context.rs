@@ -39,6 +39,8 @@ use crate::config::tabs::{TabBarEdge, TabSwitchStrategy};
 #[cfg(not(windows))]
 use crate::daemon::foreground_process_path;
 use crate::display::Display;
+use crate::display::DisplayUpdateParams;
+use crate::display::DrawParams;
 use crate::display::window::Window;
 use crate::event::{
     ActionContext, Event, EventProxy, EventType, InlineSearchState, Mouse, SearchState, TabAction,
@@ -903,15 +905,15 @@ impl WindowContext {
         let (display, tabs, config) = (&mut self.display, &mut self.tabs, &self.config);
         let active_tab = &mut tabs[active_tab];
         let terminal = active_tab.terminal.lock();
-        display.draw(
+        display.draw(DrawParams {
             terminal,
             scheduler,
-            &active_tab.message_buffer,
+            message_buffer: &active_tab.message_buffer,
             config,
-            &mut active_tab.search_state,
-            &tab_titles,
-            self.tab_title_editor.as_ref().map(|editor| editor.value.as_str()),
-        );
+            search_state: &mut active_tab.search_state,
+            tab_titles: &tab_titles,
+            tab_title_editor: self.tab_title_editor.as_ref().map(|editor| editor.value.as_str()),
+        });
     }
 
     /// Process events for this terminal window.
@@ -1048,17 +1050,21 @@ impl WindowContext {
             let (display, tabs, config) = (&mut self.display, &mut self.tabs, &self.config);
             let active_tab = &mut tabs[active_index];
             let mut terminal = active_tab.terminal.lock();
+            let params = DisplayUpdateParams {
+                config,
+                message_buffer: &active_tab.message_buffer,
+                search_state: &mut active_tab.search_state,
+                tab_bar_lines,
+                top_tab_bar_lines: tab_bar_at_top,
+                tab_title_editor_lines,
+            };
             Self::submit_display_update(
                 &mut terminal,
                 display,
                 &mut active_tab.notifier,
-                &active_tab.message_buffer,
                 &mut active_tab.search_state,
                 old_is_searching,
-                config,
-                tab_bar_lines,
-                tab_bar_at_top,
-                tab_title_editor_lines,
+                params,
             );
             self.dirty = true;
         }
@@ -1126,13 +1132,9 @@ impl WindowContext {
         terminal: &mut Term<EventProxy>,
         display: &mut Display,
         notifier: &mut Notifier,
-        message_buffer: &MessageBuffer,
         search_state: &mut SearchState,
         old_is_searching: bool,
-        config: &UiConfig,
-        tab_bar_lines: usize,
-        top_tab_bar_lines: usize,
-        tab_title_editor_lines: usize,
+        params: DisplayUpdateParams<'_>,
     ) {
         // Compute cursor positions before resize.
         let num_lines = terminal.screen_lines();
@@ -1143,16 +1145,7 @@ impl WindowContext {
             search_state.direction == Direction::Left
         };
 
-        display.handle_update(
-            terminal,
-            notifier,
-            message_buffer,
-            search_state,
-            config,
-            tab_bar_lines,
-            top_tab_bar_lines,
-            tab_title_editor_lines,
-        );
+        display.handle_update(terminal, notifier, params);
 
         let new_is_searching = search_state.history_index.is_some();
         if !old_is_searching && new_is_searching {

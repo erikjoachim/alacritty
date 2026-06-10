@@ -106,14 +106,23 @@ pub trait ActionContext<T: EventListener> {
     fn terminal(&self) -> &Term<T>;
     fn terminal_mut(&mut self) -> &mut Term<T>;
     fn spawn_new_instance(&mut self) {}
+    #[allow(dead_code)]
     fn create_new_tab(&mut self) {}
+    #[allow(dead_code)]
     fn close_tab(&mut self) {}
+    #[allow(dead_code)]
     fn select_next_tab(&mut self) {}
+    #[allow(dead_code)]
     fn select_previous_tab(&mut self) {}
+    #[allow(dead_code)]
     fn select_tab_at_index(&mut self, _index: usize) {}
+    #[allow(dead_code)]
     fn select_last_tab(&mut self) {}
+    #[allow(dead_code)]
     fn move_tab_forward(&mut self) {}
+    #[allow(dead_code)]
     fn move_tab_backward(&mut self) {}
+    #[allow(dead_code)]
     fn set_tab_title(&mut self) {}
     fn window_close_confirmation_active(&self) -> bool {
         false
@@ -1169,14 +1178,12 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         let point = self.ctx.mouse_point();
         let hyperlink = self.ctx.terminal().grid()[point].hyperlink();
 
-        if self.ctx.config().tabs.mouse.enabled {
-            if self.ctx.tab_at_mouse().is_some() {
-                return if self.ctx.config().tabs.mouse.hover {
-                    CursorIcon::Pointer
-                } else {
-                    CursorIcon::Default
-                };
-            }
+        if self.ctx.config().tabs.mouse.enabled && self.ctx.tab_at_mouse().is_some() {
+            return if self.ctx.config().tabs.mouse.hover {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            };
         }
 
         // Function to check if mouse is on top of a hint.

@@ -425,6 +425,35 @@ struct TabHitBox {
     height: i32,
 }
 
+struct DisplayUpdateParams<'a> {
+    config: &'a UiConfig,
+    message_buffer: &'a MessageBuffer,
+    search_state: &'a mut SearchState,
+    tab_bar_lines: usize,
+    top_tab_bar_lines: usize,
+    tab_title_editor_lines: usize,
+}
+
+struct DrawParams<'a, T: EventListener> {
+    terminal: parking_lot::MutexGuard<'a, Term<T>>,
+    scheduler: &'a mut Scheduler,
+    message_buffer: &'a MessageBuffer,
+    config: &'a UiConfig,
+    search_state: &'a mut SearchState,
+    tab_titles: &'a [(String, bool)],
+    tab_title_editor: Option<&'a str>,
+}
+
+struct DrawStringParams<'a> {
+    point: Point<usize>,
+    fg: Rgb,
+    bg: Rgb,
+    bg_alpha: f32,
+    text: &'a str,
+    size_info: &'a SizeInfo,
+    flags: Flags,
+}
+
 #[inline]
 fn term_dimensions_changed<T, S: TermDimensions>(terminal: &Term<T>, size: &S) -> bool {
     terminal.screen_lines() != size.screen_lines() || terminal.columns() != size.columns()
@@ -692,12 +721,7 @@ impl Display {
         &mut self,
         terminal: &mut Term<T>,
         pty_resize_handle: &mut dyn OnResize,
-        message_buffer: &MessageBuffer,
-        search_state: &mut SearchState,
-        config: &UiConfig,
-        tab_bar_lines: usize,
-        top_tab_bar_lines: usize,
-        tab_title_editor_lines: usize,
+        params: DisplayUpdateParams<'_>,
     ) where
         T: EventListener,
     {
@@ -739,20 +763,25 @@ impl Display {
             cell_height,
             padding.0,
             padding.1,
-            config.window.dynamic_padding,
+            params.config.window.dynamic_padding,
         );
 
         // Update number of column/lines in the viewport.
-        let search_active = search_state.history_index.is_some();
-        let message_bar_lines = message_buffer.message().map_or(0, |m| m.text(&new_size).len());
+        let search_active = params.search_state.history_index.is_some();
+        let message_bar_lines = params.message_buffer.message().map_or(0, |m| m.text(&new_size).len());
         let search_lines = usize::from(search_active);
         new_size.reserve_lines(
-            message_bar_lines + search_lines + tab_bar_lines + tab_title_editor_lines,
+            message_bar_lines
+                + search_lines
+                + params.tab_bar_lines
+                + params.tab_title_editor_lines,
         );
-        new_size.add_top_padding(top_tab_bar_lines as f32 * new_size.cell_height());
+        new_size.add_top_padding(
+            params.top_tab_bar_lines as f32 * new_size.cell_height(),
+        );
 
         // Update resize increments.
-        if config.window.resize_increments {
+        if params.config.window.resize_increments {
             self.window.set_resize_increments(PhysicalSize::new(cell_width, cell_height));
         }
 
@@ -818,16 +847,10 @@ impl Display {
     /// This call may block if vsync is enabled.
     pub fn draw<T: EventListener>(
         &mut self,
-        mut terminal: MutexGuard<'_, Term<T>>,
-        scheduler: &mut Scheduler,
-        message_buffer: &MessageBuffer,
-        config: &UiConfig,
-        search_state: &mut SearchState,
-        tab_titles: &[(String, bool)],
-        tab_title_editor: Option<&str>,
+        params: DrawParams<'_, T>,
     ) {
         // Collect renderable content before the terminal is dropped.
-        let mut content = RenderableContent::new(config, self, &terminal, search_state);
+        let mut content = RenderableContent::new(params.config, self, &params.terminal, params.search_state);
         let mut grid_cells = Vec::new();
         for cell in &mut content {
             grid_cells.push(cell);
@@ -838,16 +861,16 @@ impl Display {
         let display_offset = content.display_offset();
         let cursor = content.cursor();
 
-        let cursor_point = terminal.grid().cursor.point;
-        let total_lines = terminal.grid().total_lines();
+        let cursor_point = params.terminal.grid().cursor.point;
+        let total_lines = params.terminal.grid().total_lines();
         let metrics = self.glyph_cache.font_metrics();
         let size_info = self.size_info;
 
-        let vi_mode = terminal.mode().contains(TermMode::VI);
-        let vi_cursor_point = if vi_mode { Some(terminal.vi_mode_cursor.point) } else { None };
+        let vi_mode = params.terminal.mode().contains(TermMode::VI);
+        let vi_cursor_point = if vi_mode { Some(params.terminal.vi_mode_cursor.point) } else { None };
 
         // Add damage from the terminal.
-        match terminal.damage() {
+        match params.terminal.damage() {
             TermDamage::Full => self.damage_tracker.frame().mark_fully_damaged(),
             TermDamage::Partial(damaged_lines) => {
                 for damage in damaged_lines {
@@ -855,10 +878,10 @@ impl Display {
                 }
             },
         }
-        terminal.reset_damage();
+        params.terminal.reset_damage();
 
         // Drop terminal as early as possible to free lock.
-        drop(terminal);
+        drop(params.terminal);
 
         // Invalidate highlighted hints if grid has changed.
         self.validate_hint_highlights(display_offset);
@@ -935,11 +958,11 @@ impl Display {
             self.draw_line_indicator(config, total_lines, obstructed_column, line);
         } else if search_state.regex().is_some() {
             // Show current display offset in vi-less search to indicate match position.
-            self.draw_line_indicator(config, total_lines, None, display_offset);
+            self.draw_line_indicator(params.config, total_lines, None, display_offset);
         };
 
         // Draw cursor.
-        rects.extend(cursor.rects(&size_info, config.cursor.thickness()));
+        rects.extend(cursor.rects(&size_info, params.config.cursor.thickness()));
 
         // Push visual bell after url/underline/strikeout rects.
         let visual_bell_intensity = self.visual_bell.intensity();
@@ -949,16 +972,16 @@ impl Display {
                 0.,
                 size_info.width(),
                 size_info.height(),
-                config.bell.color,
+                params.config.bell.color,
                 visual_bell_intensity as f32,
             );
             rects.push(visual_bell_rect);
         }
 
         // Handle IME positioning and search bar rendering.
-        let ime_position = match search_state.regex() {
+        let ime_position = match params.search_state.regex() {
             Some(regex) => {
-                let search_label = match search_state.direction() {
+                let search_label = match params.search_state.direction() {
                     Direction::Right => FORWARD_SEARCH_LABEL,
                     Direction::Left => BACKWARD_SEARCH_LABEL,
                 };
@@ -966,7 +989,7 @@ impl Display {
                 let search_text = Self::format_search(regex, search_label, size_info.columns());
 
                 // Render the search bar.
-                self.draw_search(config, &search_text);
+                self.draw_search(params.config, &search_text);
 
                 // Draw search bar cursor.
                 let line = size_info.screen_lines();
@@ -974,12 +997,12 @@ impl Display {
 
                 // Add cursor to search bar if IME is not active.
                 if self.ime.preedit().is_none() {
-                    let fg = config.colors.footer_bar_foreground();
+                    let fg = params.config.colors.footer_bar_foreground();
                     let shape = CursorShape::Underline;
                     let cursor_width = NonZeroU32::new(1).unwrap();
                     let cursor =
                         RenderableCursor::new(Point::new(line, column), shape, fg, cursor_width);
-                    rects.extend(cursor.rects(&size_info, config.cursor.thickness()));
+                    rects.extend(cursor.rects(&size_info, params.config.cursor.thickness()));
                 }
 
                 Some(Point::new(line, column))
@@ -997,21 +1020,21 @@ impl Display {
         // Handle IME.
         if self.ime.is_enabled() {
             if let Some(point) = ime_position {
-                let (fg, bg) = if search_state.regex().is_some() {
-                    (config.colors.footer_bar_foreground(), config.colors.footer_bar_background())
+                let (fg, bg) = if params.search_state.regex().is_some() {
+                    (params.config.colors.footer_bar_foreground(), params.config.colors.footer_bar_background())
                 } else {
                     (foreground_color, background_color)
                 };
 
-                self.draw_ime_preview(point, fg, bg, &mut rects, config);
+                self.draw_ime_preview(point, fg, bg, &mut rects, params.config);
             }
         }
 
-        let tab_title_editor_offset = usize::from(tab_title_editor.is_some());
+        let tab_title_editor_offset = usize::from(params.tab_title_editor.is_some());
 
-        if let Some(message) = message_buffer.message() {
+        if let Some(message) = params.message_buffer.message() {
             let search_offset =
-                usize::from(search_state.regex().is_some()) + tab_title_editor_offset;
+                usize::from(params.search_state.regex().is_some()) + tab_title_editor_offset;
             let text = message.text(&size_info);
 
             // Create a new rectangle for the background.
@@ -1019,8 +1042,8 @@ impl Display {
             let y = size_info.cell_height().mul_add(start_line as f32, size_info.padding_y());
 
             let bg = match message.ty() {
-                MessageType::Error => config.colors.normal.red,
-                MessageType::Warning => config.colors.normal.yellow,
+                MessageType::Error => params.config.colors.normal.red,
+                MessageType::Warning => params.config.colors.normal.yellow,
             };
 
             let x = 0;
@@ -1040,7 +1063,7 @@ impl Display {
 
             // Relay messages to the user.
             let glyph_cache = &mut self.glyph_cache;
-            let fg = config.colors.primary.background;
+            let fg = params.config.colors.primary.background;
             for (i, message_text) in text.iter().enumerate() {
                 let point = Point::new(start_line + i, Column(0));
                 self.renderer.draw_string(
@@ -1057,10 +1080,10 @@ impl Display {
             self.renderer.draw_rects(&size_info, &metrics, rects);
         }
 
-        if let Some(tab_title_editor) = tab_title_editor {
-            let line = size_info.screen_lines() + usize::from(search_state.regex().is_some());
+        if let Some(tab_title_editor) = params.tab_title_editor {
+            let line = size_info.screen_lines() + usize::from(params.search_state.regex().is_some());
             self.draw_footer_text(
-                config,
+                params.config,
                 &format_search_prompt("Tab title: ", tab_title_editor, size_info.columns()),
                 line,
             );
@@ -1072,26 +1095,26 @@ impl Display {
         }
 
         self.tab_hit_boxes.clear();
-        if config.tabs.display_tab_bar(tab_titles.len()) {
-            let line = match config.tabs.tab_bar_edge {
+        if params.config.tabs.display_tab_bar(params.tab_titles.len()) {
+            let line = match params.config.tabs.tab_bar_edge {
                 TabBarEdge::Top => 0,
                 TabBarEdge::Bottom => {
                     let search_lines =
-                        usize::from(search_state.regex().is_some()) + tab_title_editor_offset;
+                        usize::from(params.search_state.regex().is_some()) + tab_title_editor_offset;
                     let message_lines =
-                        message_buffer.message().map_or(0, |m| m.text(&size_info).len());
+                        params.message_buffer.message().map_or(0, |m| m.text(&size_info).len());
                     size_info.screen_lines() + search_lines + message_lines
                 },
             };
-            self.draw_tab_bar(config, tab_titles, line);
+            self.draw_tab_bar(params.config, params.tab_titles, line);
         }
 
-        self.draw_render_timer(config);
+        self.draw_render_timer(params.config);
 
         // Draw hyperlink uri preview.
         if has_highlighted_hint {
             let cursor_point = vi_cursor_point.or(Some(cursor_point));
-            self.draw_hyperlink_preview(config, cursor_point, display_offset);
+            self.draw_hyperlink_preview(params.config, cursor_point, display_offset);
         }
 
         // Notify winit that we're about to present.
@@ -1418,39 +1441,30 @@ impl Display {
         );
     }
 
-    fn draw_string_with_flags(
-        &mut self,
-        point: Point<usize>,
-        fg: Rgb,
-        bg: Rgb,
-        bg_alpha: f32,
-        text: &str,
-        size_info: &SizeInfo,
-        flags: Flags,
-    ) -> usize {
-        let mut cells = Vec::with_capacity(text.chars().count());
-        let mut column = point.column.0;
+    fn draw_string_with_flags(&mut self, params: DrawStringParams<'_>) -> usize {
+        let mut cells = Vec::with_capacity(params.text.chars().count());
+        let mut column = params.point.column.0;
 
-        for character in text.chars() {
+        for character in params.text.chars() {
             let width = character.width().unwrap_or(1);
-            let cell_flags = if width == 2 { flags | Flags::WIDE_CHAR } else { flags };
+            let cell_flags = if width == 2 { params.flags | Flags::WIDE_CHAR } else { params.flags };
 
             cells.push(crate::display::content::RenderableCell {
-                point: Point::new(point.line, Column(column)),
+                point: Point::new(params.point.line, Column(column)),
                 character,
                 extra: None,
                 flags: cell_flags,
-                bg_alpha,
-                fg,
-                bg,
-                underline: fg,
+                bg_alpha: params.bg_alpha,
+                fg: params.fg,
+                bg: params.bg,
+                underline: params.fg,
             });
 
             column += width;
         }
 
-        self.renderer.draw_cells(size_info, &mut self.glyph_cache, cells.into_iter());
-        column - point.column.0
+        self.renderer.draw_cells(params.size_info, &mut self.glyph_cache, cells.into_iter());
+        column - params.point.column.0
     }
 
     #[inline(never)]
@@ -1624,15 +1638,15 @@ impl Display {
                     break;
                 }
 
-                self.draw_string_with_flags(
-                    Point::new(line, Column(column)),
-                    tab_fg,
-                    rendered_tab_bg,
-                    0.0,
-                    &visible,
-                    &size_info,
-                    tab_font_flags(font_style),
-                );
+                self.draw_string_with_flags(DrawStringParams {
+                    point: Point::new(line, Column(column)),
+                    fg: tab_fg,
+                    bg: rendered_tab_bg,
+                    bg_alpha: 0.0,
+                    text: &visible,
+                    size_info: &size_info,
+                    flags: tab_font_flags(font_style),
+                });
                 column += width_cells + reserve;
             }
 
@@ -1695,15 +1709,15 @@ impl Display {
                 translucent_alpha
             };
 
-            column += self.draw_string_with_flags(
-                Point::new(line, Column(column)),
-                tab_fg,
-                tab_bg,
+            column += self.draw_string_with_flags(DrawStringParams {
+                point: Point::new(line, Column(column)),
+                fg: tab_fg,
+                bg: tab_bg,
                 bg_alpha,
-                &visible,
-                &size_info,
-                tab_font_flags(font_style),
-            );
+                text: &visible,
+                size_info: &size_info,
+                flags: tab_font_flags(font_style),
+            });
 
             let separator_width = match config.tabs.tab_bar_style {
                 TabBarStyle::Powerline => {
@@ -1717,26 +1731,26 @@ impl Display {
                         trailing_powerline_separator(config.tabs.tab_powerline_style)
                     }
                     .to_string();
-                    self.draw_string_with_flags(
-                        Point::new(line, Column(column)),
-                        tab_bg,
-                        next_bg,
-                        if next_bg == bar_bg { translucent_alpha } else { 1.0 },
-                        &separator,
-                        &size_info,
-                        Flags::empty(),
-                    )
+                    self.draw_string_with_flags(DrawStringParams {
+                        point: Point::new(line, Column(column)),
+                        fg: tab_bg,
+                        bg: next_bg,
+                        bg_alpha: if next_bg == bar_bg { translucent_alpha } else { 1.0 },
+                        text: &separator,
+                        size_info: &size_info,
+                        flags: Flags::empty(),
+                    })
                 },
                 TabBarStyle::Separator | TabBarStyle::Fade if index + 1 < tab_titles.len() => self
-                    .draw_string_with_flags(
-                        Point::new(line, Column(column)),
-                        inactive_fg,
-                        bar_bg,
-                        translucent_alpha,
-                        &config.tabs.tab_separator,
-                        &size_info,
-                        Flags::empty(),
-                    ),
+                    .draw_string_with_flags(DrawStringParams {
+                        point: Point::new(line, Column(column)),
+                        fg: inactive_fg,
+                        bg: bar_bg,
+                        bg_alpha: translucent_alpha,
+                        text: &config.tabs.tab_separator,
+                        size_info: &size_info,
+                        flags: Flags::empty(),
+                    }),
                 _ => 0,
             };
             column += separator_width;
